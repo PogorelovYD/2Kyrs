@@ -39,6 +39,32 @@ h2 {
     display: flex; flex-wrap: wrap; width: 100%; max-width: 1400px;
     margin: 2rem auto; padding: 1rem; gap: 2rem; flex-flow: wrap-reverse
 }
+
+/* === Оверлей «сейчас не время» === */
+.closed-overlay {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center; text-align: center;
+    background: linear-gradient(180deg, rgba(13,15,26,.95), rgba(13,15,26,.95));
+    z-index: 9999; padding: 2rem;
+    border-top: 2px solid var(--color-border);
+}
+.closed-overlay.active { display: flex; }
+.closed-card {
+    background: var(--color-panel-bg);
+    border: 1px dashed var(--color-border);
+    border-radius: 12px; padding: 2rem 2.5rem; max-width: 720px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+.closed-title {
+    font-family: var(--font-secondary);
+    font-size: 1.6rem; margin-bottom: .75rem; color: var(--color-secondary);
+    text-shadow: 0 0 8px rgba(80,227,194,.35);
+}
+.closed-text { color: var(--color-text-label); line-height: 1.6; }
+.closed-emoji { font-size: 2.2rem; margin-bottom: .5rem; display: block; }
+.closed-schedule { margin-top: 1rem; font-family: monospace; opacity: .85; }
+
+/* === ваш существующий стиль === */
 .queue-panel { flex: 1; min-width: 300px; }
 .form-panel { flex: 1; min-width: 300px; max-width: 500px; }
 .queue-panel, .form-panel > div {
@@ -206,8 +232,20 @@ button:disabled .loader { display: block; }
 </head>
 <body>
 
+    <!-- ====== ОВЕРЛЕЙ «СЕЙЧАС НЕ ВРЕМЯ» ====== -->
+    <div id="closed-overlay" class="closed-overlay">
+        <div class="closed-card">
+            <span class="closed-emoji">(¬_¬)</span>
+            <div class="closed-title">Сейчас не время :)</div>
+            <div class="closed-text">
+                Этот сервис доступен только в рабочие часы.<br>
+                Загляните, пожалуйста, позже.
+            </div>
+            <div class="closed-schedule" id="closed-schedule"></div>
+        </div>
+    </div>
+
     <main class="container">
-        
         <section class="queue-panel">
             <header class="panel-header">
                 <h2>ТЕКУЩАЯ ОЧЕРЕДЬ</h2>
@@ -216,8 +254,7 @@ button:disabled .loader { display: block; }
                 </div>
             </header>
             <div class="queue-list-container">
-                <ul id="queue-list">
-                    </ul>
+                <ul id="queue-list"></ul>
                 <div id="empty-queue-message" class="empty-message">
                     <span>(¬_¬)</span>
                     <p>Очередь пуста.<br>Будь первым.</p>
@@ -256,35 +293,111 @@ button:disabled .loader { display: block; }
                         <span class="talon-label">Номер в очереди:</span>
                         <span id="talon-number" class="talon-number-large"></span>
                     </div>
-                    <div class="talon-footer">
-                        Вы в очереди
-                    </div>
+                    <div class="talon-footer">Вы в очереди</div>
                 </div>
                 <button id="delete-button" class="button-secondary button-danger">Выйти из очереди</button>
             </div>
-
         </section>
-
     </main>
 
+    <!-- ===== БИБЛИОТЕКИ ===== -->
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
 
+    <!-- ===== РАСПИСАНИЕ ДОСТУПА (меняйте здесь) ===== -->
+    <script>
+    // ===== НАСТРОЙКИ ДОСТУПА =====
+    const ACCESS_RULES = {
+      // Часовой пояс: IANA-строка (например, 'Europe/Moscow') или 'local' — локальное время пользователя.
+      timeZone: 'Europe/Moscow',
+      // Окна доступности (0=вс, 1=пн, ... , 6=сб)
+      windows: [
+        { days: [3], start: '12:40', end: '14:10' }, // Пн–Пт 09:00–18:00
+        // { days: [6], start: '10:00', end: '14:00' },     // Пример: Сб 10:00–14:00
+      ],
+      message: 'Сейчас не время :)'
+    };
+
+    // ===== ЛОГИКА ПРОВЕРКИ РАСПИСАНИЯ =====
+    function parseHM(hm){ const [h,m]=hm.split(':').map(Number); return h*60+m; }
+
+    function getZonedNowParts(tz) {
+      const d = new Date();
+      // День недели берём нейтрально (en-US), чтобы получить Sun..Sat
+      const dowFmt = new Intl.DateTimeFormat('en-US', { timeZone: tz === 'local' ? undefined : tz, weekday: 'short' });
+      const hmFmt  = new Intl.DateTimeFormat('ru-RU', { timeZone: tz === 'local' ? undefined : tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+      const dowStr = dowFmt.format(d); // 'Sun'..'Sat'
+      const parts  = hmFmt.formatToParts(d).reduce((a,p)=>{a[p.type]=p.value;return a;}, {});
+      const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
+      const hours = parseInt(parts.hour, 10);
+      const minutes = parseInt(parts.minute, 10);
+      return { dow: dowMap[dowStr], minutesFromMidnight: hours*60 + minutes };
+    }
+
+    function isOpenNow(rules = ACCESS_RULES) {
+      const { timeZone, windows } = rules;
+      const now = getZonedNowParts(timeZone);
+      return windows.some(w => w.days.includes(now.dow)
+        && now.minutesFromMidnight >= parseHM(w.start)
+        && now.minutesFromMidnight <  parseHM(w.end));
+    }
+
+    // Пишем расписание на оверлей для удобства пользователей
+    function renderSchedule(rules = ACCESS_RULES) {
+      const mapDay = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+      const text = rules.windows.map(w =>
+        `${w.days.map(d=>mapDay[d]).join(', ')} — ${w.start}–${w.end}`
+      ).join(' | ');
+      const el = document.getElementById('closed-schedule');
+      if (el) el.textContent = text ? `График: ${text}` : '';
+    }
+
+    // Флаг, чтобы остальной код (Firebase и т.д.) не стартовал
+    window.__SITE_OPEN__ = isOpenNow();
+    window.__BLOCK_INIT__ = !window.__SITE_OPEN__;
+
+    document.addEventListener('DOMContentLoaded', () => {
+      renderSchedule();
+      const overlay = document.getElementById('closed-overlay');
+      const container = document.querySelector('.container');
+      if (window.__SITE_OPEN__) {
+        overlay?.classList.remove('active');
+        container?.classList.remove('hidden');
+        container?.removeAttribute('inert');
+      } else {
+        // Показать оверлей и «заморозить» контент
+        overlay?.classList.add('active');
+        container?.classList.add('hidden');
+        container?.setAttribute('inert','');
+        // Сообщение меняется по настройке
+        const title = overlay?.querySelector('.closed-title');
+        if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
+      }
+    });
+    </script>
+
+    <!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ ===== -->
     <script>
     (function() {
         'use strict';
+
+        // Если сейчас «не время», не инициализируем Firebase/слушателей.
+        if (window.__BLOCK_INIT__) { 
+            console.log('App init skipped: outside of allowed time window.');
+            return; 
+        }
         
-  const firebaseConfig = {
-    apiKey: "AIzaSyBv6hJVtMFETIRW-QUVRSKh73bmm9b4zEM",
-    authDomain: "talony-fd34c.firebaseapp.com",
-    projectId: "talony-fd34c",
-    storageBucket: "talony-fd34c.firebasestorage.app",
-    messagingSenderId: "806366155366",
-    appId: "1:806366155366:web:c8ce518f0be3561bd6d3a7"
-  };
+        // === ВАШИ ТЕКУЩИЕ НАСТРОЙКИ FIREBASE ===
+        const firebaseConfig = {
+          apiKey: "AIzaSyBv6hJVtMFETIRW-QUVRSKh73bmm9b4zEM",
+          authDomain: "talony-fd34c.firebaseapp.com",
+          projectId: "talony-fd34c",
+          storageBucket: "talony-fd34c.firebasestorage.app",
+          messagingSenderId: "806366155366",
+          appId: "1:806366155366:web:c8ce518f0be3561bd6d3a7"
+        };
 
         firebase.initializeApp(firebaseConfig);
-        
         const db = firebase.firestore();
         const queueCollection = db.collection('queue');
 
@@ -293,19 +406,14 @@ button:disabled .loader { display: block; }
         const STORAGE_KEY_LAST_CLEANUP = 'myQueueLastCleanup';
 
         let currentUserTalonId = null;
-
         const dom = {};
 
         const UI = {
             renderQueue: (queueData) => {
                 dom.queueList.innerHTML = ''; 
-                
-                if (queueData.length === 0) {
-                    dom.emptyMessage.classList.remove('hidden');
-                } else {
-                    dom.emptyMessage.classList.add('hidden');
-                }
-                
+                if (queueData.length === 0) dom.emptyMessage.classList.remove('hidden');
+                else dom.emptyMessage.classList.add('hidden');
+
                 const fragment = document.createDocumentFragment();
                 let userNumberInQueue = null;
                 let userTalonStillExists = false;
@@ -315,34 +423,24 @@ button:disabled .loader { display: block; }
                         userNumberInQueue = index + 1;
                         userTalonStillExists = true;
                     }
-
                     const li = document.createElement('li');
-                    
                     const numberSpan = document.createElement('span');
                     numberSpan.className = 'queue-number';
                     numberSpan.textContent = `#${index + 1}`;
-                    
                     const nameSpan = document.createElement('span');
                     nameSpan.className = 'queue-name';
                     nameSpan.textContent = item.name;
-                    
                     const timeSpan = document.createElement('span');
                     timeSpan.className = 'queue-time';
-                    
                     if (item.timestamp) {
                         const date = item.timestamp.toDate();
-                        timeSpan.textContent = date.toLocaleTimeString('ru-RU', {
-                            hour: '2-digit',
-                            minute: '2-digit'
-                        });
+                        timeSpan.textContent = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
                     }
-                    
                     li.appendChild(numberSpan);
                     li.appendChild(nameSpan);
                     li.appendChild(timeSpan);
                     fragment.appendChild(li);
                 });
-                
                 dom.queueList.appendChild(fragment);
 
                 if (currentUserTalonId && !userTalonStillExists) {
@@ -352,50 +450,34 @@ button:disabled .loader { display: block; }
                     UI.updateTalonNumber(userNumberInQueue);
                 }
             },
-
-            updateTalonNumber: (number) => {
-                if (dom.talonNumber) {
-                    dom.talonNumber.textContent = `#${number}`;
-                }
-            },
-
-            showQueueLoading: (isLoading) => {
-                dom.queueLoader.classList.toggle('active', isLoading);
-            },
-
+            updateTalonNumber: (number) => { if (dom.talonNumber) dom.talonNumber.textContent = `#${number}`; },
+            showQueueLoading: (isLoading) => { dom.queueLoader.classList.toggle('active', isLoading); },
             setFormLoading: (isLoading) => {
                 dom.submitButton.disabled = isLoading;
                 dom.nameInput.disabled = isLoading;
                 dom.buttonText.textContent = isLoading ? 'РЕГИСТРАЦИЯ...' : 'ВЗЯТЬ ТАЛОН';
             },
-
             setTalonLoading: (isLoading) => {
                 if (dom.deleteButton) {
                     dom.deleteButton.disabled = isLoading;
                     dom.deleteButton.textContent = isLoading ? 'ВЫХОДИМ...' : 'Выйти из очереди';
                 }
             },
-
             showFormError: (message) => {
                 dom.formError.textContent = message;
                 dom.formError.style.display = message ? 'block' : 'none';
             },
-
             showTalon: (name, docId) => {
                 currentUserTalonId = docId; 
-
                 dom.talonName.textContent = name;
                 dom.talonNumber.textContent = '#...'; 
-                
                 dom.formContainer.classList.add('hidden');
                 dom.talonContainer.classList.remove('hidden');
             },
-
             resetForm: () => {
                 currentUserTalonId = null; 
                 localStorage.removeItem(STORAGE_KEY_ID);
                 localStorage.removeItem(STORAGE_KEY_NAME);
-
                 dom.formContainer.classList.remove('hidden');
                 dom.talonContainer.classList.add('hidden');
                 dom.nameInput.value = '';
@@ -406,97 +488,50 @@ button:disabled .loader { display: block; }
         const API = {
             listenForQueueChanges: () => {
                 UI.showQueueLoading(true);
-                
-                queueCollection
-                    .orderBy('timestamp', 'asc')
-                    .onSnapshot(
-                        (snapshot) => {
-                            const queueData = [];
-                            snapshot.forEach((doc) => {
-                                queueData.push({ 
-                                    id: doc.id, 
-                                    ...doc.data() 
-                                });
-                            });
-                            
-                            UI.renderQueue(queueData);
-                            UI.showQueueLoading(false);
-                        }, 
-                        (error) => {
-                            console.error("Ошибка real-time подписки:", error);
-                            UI.showFormError("Ошибка: не могу обновить очередь.");
-                            UI.showQueueLoading(false);
-                        }
-                    );
+                queueCollection.orderBy('timestamp', 'asc').onSnapshot(
+                    (snapshot) => {
+                        const queueData = [];
+                        snapshot.forEach((doc) => queueData.push({ id: doc.id, ...doc.data() }));
+                        UI.renderQueue(queueData);
+                        UI.showQueueLoading(false);
+                    }, 
+                    (error) => {
+                        console.error("Ошибка real-time подписки:", error);
+                        UI.showFormError("Ошибка: не могу обновить очередь.");
+                        UI.showQueueLoading(false);
+                    }
+                );
             },
-
             addTalon: async (name) => {
                 UI.setFormLoading(true);
                 UI.showFormError(null);
-                
                 try {
                     const docRef = await queueCollection.add({
-                        name: name,
-                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                        name, timestamp: firebase.firestore.FieldValue.serverTimestamp()
                     });
-                    
                     localStorage.setItem(STORAGE_KEY_ID, docRef.id);
                     localStorage.setItem(STORAGE_KEY_NAME, name);
-                    
                     UI.showTalon(name, docRef.id);
-                    
                 } catch (error) {
                     console.error('Ошибка при добавлении талона:', error);
                     UI.showFormError(`Ошибка: ${error.message}`);
-                } finally {
-                    UI.setFormLoading(false);
-                }
+                } finally { UI.setFormLoading(false); }
             },
-
             deleteTalon: async () => {
-                if (!currentUserTalonId) {
-                    console.error("Нет ID талона для удаления.");
-                    return;
-                }
-
-                UI.setTalonLoading(true);
-                UI.showFormError(null);
-
-                try {
-                    await queueCollection.doc(currentUserTalonId).delete();
-                    UI.resetForm();
-                } catch (error) {
-                    console.error('Ошибка при удалении талона:', error);
-                    UI.showFormError(`Ошибка: ${error.message}`);
-                } finally {
-                    UI.setTalonLoading(false);
-                }
+                if (!currentUserTalonId) return;
+                UI.setTalonLoading(true); UI.showFormError(null);
+                try { await queueCollection.doc(currentUserTalonId).delete(); UI.resetForm(); }
+                catch (error) { console.error('Ошибка при удалении талона:', error); UI.showFormError(`Ошибка: ${error.message}`); }
+                finally { UI.setTalonLoading(false); }
             },
-
             deleteOldTalons: async () => {
-                console.log("Запуск чистильщика старых талонов...");
                 try {
-                    const fiveHoursAgo = firebase.firestore.Timestamp.fromMillis(
-                        Date.now() - (5 * 60 * 60 * 1000)
-                    );
-
-                    const oldTalonsQuery = queueCollection.where("timestamp", "<", fiveHoursAgo);
-                    const snapshot = await oldTalonsQuery.get();
-                    
-                    if (snapshot.empty) {
-                        console.log("Старых талонов не найдено.");
-                        return;                    }
-
-                    console.log(`Найдено ${snapshot.size} старых талонов. Удаляю...`);
-
+                    const fiveHoursAgo = firebase.firestore.Timestamp.fromMillis(Date.now() - (5 * 60 * 60 * 1000));
+                    const snapshot = await queueCollection.where("timestamp", "<", fiveHoursAgo).get();
+                    if (snapshot.empty) return;
                     const batch = db.batch();
-                    snapshot.forEach(doc => {
-                        batch.delete(doc.ref);
-                    });
-
+                    snapshot.forEach(doc => batch.delete(doc.ref));
                     await batch.commit();
-                    console.log("Чистка завершена.");
-
                 } catch (error) {
                     console.error("Ошибка во время чистки:", error);
                 }
@@ -507,29 +542,17 @@ button:disabled .loader { display: block; }
             handleFormSubmit: (event) => {
                 event.preventDefault();
                 const name = dom.nameInput.value.trim();
-                
-                if (name.length < 2) {
-                    UI.showFormError('Имя должно содержать хотя бы 2 символа.');
-                    return;
-                }
-                if (name.length > 50) {
-                    UI.showFormError('Имя слишком длинное (макс. 50 символов).');
-                    return;
-                }
-                
+                if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
+                if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
                 API.addTalon(name);
             },
-
-            handleDeleteClick: () => {
-                API.deleteTalon();
-            }
+            handleDeleteClick: () => API.deleteTalon()
         };
         
         function cacheDomElements() {
             dom.queueList = document.getElementById('queue-list');
             dom.queueLoader = document.getElementById('queue-loader');
             dom.emptyMessage = document.getElementById('empty-queue-message');
-            
             dom.formPanel = document.getElementById('form-panel');
             dom.formContainer = document.getElementById('form-container');
             dom.talonForm = document.getElementById('talon-form');
@@ -537,7 +560,6 @@ button:disabled .loader { display: block; }
             dom.submitButton = document.getElementById('submit-button');
             dom.buttonText = document.querySelector('#submit-button .button-text');
             dom.formError = document.getElementById('form-error');
-            
             dom.talonContainer = document.getElementById('talon-container');
             dom.talonName = document.getElementById('talon-name');
             dom.talonNumber = document.getElementById('talon-number');
@@ -546,17 +568,9 @@ button:disabled .loader { display: block; }
 
         function init() {
             console.log('Queue App Initialized (Firebase Mode).');
-            
             cacheDomElements(); 
-
-            if (dom.talonForm) {
-                dom.talonForm.addEventListener('submit', Handlers.handleFormSubmit);
-            }
-            
-            if (dom.deleteButton) {
-                dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
-            }
-
+            if (dom.talonForm) dom.talonForm.addEventListener('submit', Handlers.handleFormSubmit);
+            if (dom.deleteButton) dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
             API.listenForQueueChanges();
 
             const storedId = localStorage.getItem(STORAGE_KEY_ID);
@@ -566,27 +580,18 @@ button:disabled .loader { display: block; }
                 UI.showTalon(storedName, storedId); 
             }
 
-
             const oneHourInMillis = 60 * 60 * 1000;
             const lastCleanup = localStorage.getItem(STORAGE_KEY_LAST_CLEANUP);
-            const now = new Date().getTime();
-
+            const now = Date.now();
             if (!lastCleanup || (now - new Date(lastCleanup).getTime()) > oneHourInMillis) {
-                console.log("Время для чистки! Запускаю...");
                 API.deleteOldTalons().then(() => {
                     localStorage.setItem(STORAGE_KEY_LAST_CLEANUP, new Date().toISOString());
-                    console.log("Время чистки сохранено.");
                 });
-            } else {
-                console.log("Чистка пока не требуется. До следующего часа.");
             }
         }
 
         document.addEventListener('DOMContentLoaded', init);
-
     })();
     </script>
 </body>
-
 </html>
-
