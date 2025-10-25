@@ -140,7 +140,7 @@ button:disabled {
 }
 button .button-text { transition: opacity 0.2s ease; }
 button:disabled .button-text { opacity: 0; }
-error-message {
+.error-message {
     color: var(--color-error); text-shadow: 0 0 5px var(--color-error);
     font-size: 0.9rem; text-align: center; display: none; 
 }
@@ -291,7 +291,7 @@ button:disabled .loader { display: block; }
                         <span class="talon-title">ТАЛОН</span>
                     </div>
                     <div class="talon-body">
-                        <span class="talon-label">Имя:</span>
+                        <span class="талон-label talon-label">Имя:</span>
                         <span id="talon-name"></span>
                         <span class="talon-label">Номер в очереди:</span>
                         <span id="talon-number" class="talon-number-large"></span>
@@ -308,16 +308,13 @@ button:disabled .loader { display: block; }
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
 
-    <!-- ===== РАСПИСАНИЕ ДОСТУПА (меняйте здесь) ===== -->
+    <!-- ===== РАСПИСАНИЕ ДОСТУПА (динамика из schedule.json) ===== -->
     <script>
-    // ===== НАСТРОЙКИ ДОСТУПА =====
+    // ===== ФОЛБЭК-ПРАВИЛА (на случай, если schedule.json недоступен при старте) =====
     const ACCESS_RULES = {
-      // Часовой пояс: IANA-строка (например, 'Europe/Moscow') или 'local' — локальное время пользователя.
       timeZone: 'Europe/Moscow',
-      // Окна доступности (0=вс, 1=пн, ... , 6=сб)
       windows: [
-        { days: [6], start: '13:38', end: '15:30' }, // ваши значения
-        // { days: [6], start: '10:00', end: '14:00' },
+        { days: [6], start: '13:20', end: '15:30' }
       ],
       message: 'Сейчас не время :)'
     };
@@ -327,7 +324,6 @@ button:disabled .loader { display: block; }
 
     function getZonedNowParts(tz) {
       const d = new Date();
-      // День недели берём нейтрально (en-US), чтобы получить Sun..Sat
       const dowFmt = new Intl.DateTimeFormat('en-US', { timeZone: tz === 'local' ? undefined : tz, weekday: 'short' });
       const hmFmt  = new Intl.DateTimeFormat('ru-RU', { timeZone: tz === 'local' ? undefined : tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
       const dowStr = dowFmt.format(d); // 'Sun'..'Sat'
@@ -346,7 +342,6 @@ button:disabled .loader { display: block; }
         && now.minutesFromMidnight <  parseHM(w.end));
     }
 
-    // Пишем расписание на оверлей для удобства пользователей
     function renderSchedule(rules = ACCESS_RULES) {
       const mapDay = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
       const text = rules.windows.map(w =>
@@ -356,7 +351,7 @@ button:disabled .loader { display: block; }
       if (el) el.textContent = text ? `График: ${text}` : '';
     }
 
-    /* === НОВОЕ: ближайшая граница окна, отсчёт и автообновление + монитор === */
+    // === Ближайшая граница (старт/конец) + обратный отсчёт и точное автообновление ===
     let __countdownInterval = null;
     let __boundaryTimeout   = null;
     let __lastPlannedBoundaryTs = null;
@@ -368,7 +363,6 @@ button:disabled .loader { display: block; }
       const fmtHM  = new Intl.DateTimeFormat('ru-RU', { timeZone: timeZone === 'local' ? undefined : timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
       const fmtDOW = new Intl.DateTimeFormat('en-US',  { timeZone: timeZone === 'local' ? undefined : timeZone, weekday: 'short' });
 
-      const parts = fmtHM.formatToParts(now).reduce((a,p)=>{a[p.type]=p.value;return a;}, {});
       const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
       const dow = dowMap[fmtDOW.format(now)];
 
@@ -423,47 +417,93 @@ button:disabled .loader { display: block; }
 
       const el = document.getElementById('reopen-countdown');
       if (!window.__SITE_OPEN__ && el) {
-        // Сайт закрыт: показываем обратный отсчёт до ближайшего открытия
         let remain = ms;
         el.textContent = `Откроется через: ${formatDuration(remain)}`;
         __countdownInterval = setInterval(() => {
           remain -= 1000;
           if (remain <= 0) {
             clearBoundaryTimers();
-            location.reload(); // в ноль — перезагрузка
+            location.reload();
           } else {
             el.textContent = `Откроется через: ${formatDuration(remain)}`;
           }
         }, 1000);
       }
 
-      // Точная перезагрузка ровно в момент границы
       const BUFFER_MS = 1000;
       __boundaryTimeout = setTimeout(() => location.reload(), Math.max(0, ms + BUFFER_MS));
     }
 
-    // Монитор состояния/расписания: чтобы подхватывать правки времени без F5
-    function startScheduleMonitor(pollMs = 5000) {
-      let lastOpen = isOpenNow();
-      let lastPlannedTs = __lastPlannedBoundaryTs;
+    // === Динамическая загрузка расписания из schedule.json (watcher) ===
+    const SCHEDULE_URL = 'schedule.json';
+    const RULES_CACHE_KEY = '__rules_cache__';
 
-      setInterval(() => {
-        const nowOpen = isOpenNow();
-        if (nowOpen !== lastOpen) {
-          location.reload();
-          return;
+    function rulesToString(r) {
+      try { return JSON.stringify(r); } catch { return ''; }
+    }
+
+    async function fetchRemoteRules() {
+      try {
+        const res = await fetch(SCHEDULE_URL + '?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) return null;
+        const json = await res.json();
+        return json;
+      } catch(e) { return null; }
+    }
+
+    function applyRulesAndReact(newRules) {
+      Object.assign(ACCESS_RULES, newRules || {});
+      const wasOpen = window.__SITE_OPEN__;
+      const nowOpen = isOpenNow(ACCESS_RULES);
+      window.__SITE_OPEN__ = nowOpen;
+      window.__BLOCK_INIT__ = !nowOpen;
+
+      const overlay = document.getElementById('closed-overlay');
+      const container = document.querySelector('.container');
+      const title = overlay?.querySelector('.closed-title');
+
+      renderSchedule(ACCESS_RULES);
+
+      if (nowOpen) {
+        overlay?.classList.remove('active');
+        container?.classList.remove('hidden');
+        container?.removeAttribute('inert');
+        if (!wasOpen) location.reload();
+      } else {
+        overlay?.classList.add('active');
+        container?.classList.add('hidden');
+        container?.setAttribute('inert','');
+        if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
+        planBoundaryAndMaybeCountdown();
+      }
+    }
+
+    async function startRemoteRulesWatcher(pollMs = 5000) {
+      let cachedStr = localStorage.getItem(RULES_CACHE_KEY) || rulesToString(ACCESS_RULES);
+
+      // Сразу тянем актуальные правила
+      const first = await fetchRemoteRules();
+      if (first) {
+        const newStr = rulesToString(first);
+        if (newStr !== cachedStr) {
+          localStorage.setItem(RULES_CACHE_KEY, newStr);
+          applyRulesAndReact(first);
+          cachedStr = newStr;
         }
-        const { ts } = msUntilNextBoundary(ACCESS_RULES);
-        if (ts && lastPlannedTs && ts !== lastPlannedTs) {
-          planBoundaryAndMaybeCountdown();
-          lastPlannedTs = __lastPlannedBoundaryTs;
-        } else if (ts && !lastPlannedTs) {
-          planBoundaryAndMaybeCountdown();
-          lastPlannedTs = __lastPlannedBoundaryTs;
+      }
+
+      // Периодические проверки (подхватываем изменения без F5)
+      setInterval(async () => {
+        const remote = await fetchRemoteRules();
+        if (!remote) return;
+        const remoteStr = rulesToString(remote);
+        if (remoteStr !== cachedStr) {
+          localStorage.setItem(RULES_CACHE_KEY, remoteStr);
+          applyRulesAndReact(remote);
+          cachedStr = remoteStr;
         }
       }, pollMs);
     }
-    /* === /НОВОЕ === */
 
     // Флаг, чтобы остальной код (Firebase и т.д.) не стартовал
     window.__SITE_OPEN__ = isOpenNow();
@@ -478,19 +518,18 @@ button:disabled .loader { display: block; }
         container?.classList.remove('hidden');
         container?.removeAttribute('inert');
       } else {
-        // Показать оверлей и «заморозить» контент
         overlay?.classList.add('active');
         container?.classList.add('hidden');
         container?.setAttribute('inert','');
-        // Сообщение меняется по настройке
         const title = overlay?.querySelector('.closed-title');
         if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
       }
 
-      // Планируем точный момент перезагрузки + запускаем обратный отсчёт (если закрыто)
+      // Планируем границу (обратный отсчёт, автообновление)
       planBoundaryAndMaybeCountdown();
-      // Плюс фоновый монитор, чтобы подхватить изменения расписания без F5
-      startScheduleMonitor(5000);
+
+      // Стартуем вотчер внешнего расписания (подхват изменений без F5)
+      startRemoteRulesWatcher(5000);
     });
     </script>
 
