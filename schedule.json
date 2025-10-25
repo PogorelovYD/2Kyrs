@@ -1,7 +1,8 @@
 {
   "timeZone": "Europe/Moscow",
   "windows": [
-    { "days": [6], "start": "13:20", "end": "15:30" }
+    { "days": [6], "start": "13:55", "end": "13:56" }
   ],
   "message": "Сейчас не время :)"
 }
+
