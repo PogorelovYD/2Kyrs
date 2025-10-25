@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Электронная очередь</title>
 
-  <!-- Анти-кеш для страницы -->
+  <!-- Анти-кеш страницы -->
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -13,7 +13,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Jura:wght@300;400;700&family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+
   <style>
+/* ===== твои стили (без изменений) ===== */
 :root {
   --color-bg: #0d0f1a;
   --color-panel-bg: #141829;
@@ -59,7 +61,7 @@ h2 {
   background: var(--color-panel-bg);
   border: 1px dashed var(--color-border);
   border-radius: 12px; padding: 2rem 2.5rem; max-width: 720px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
 }
 .closed-title {
   font-family: var(--font-secondary);
@@ -237,15 +239,17 @@ button:disabled .loader { display: block; }
 }
   </style>
 
-  <!-- Бут-CSS + пессимистичный старт (закрыто до прихода schedule.json) -->
+  <!-- Бут-CSS: до прихода schedule.json всё скрыто -->
   <style id="boot-style">
     .container { display: none !important; }
     #closed-overlay { display: flex !important; }
   </style>
+
   <script>
-    // Глобальные флаги: закрыто до первых удалённых правил
-    window.__SITE_OPEN__  = false;
-    window.__BLOCK_INIT__ = true;
+    // Глобальные флаги: всегда закрыто до удалённых правил
+    window.__SITE_OPEN__   = false;
+    window.__BLOCK_INIT__  = true;
+    window.__APP_STARTED__ = false; // чтобы стартануть Firebase один раз
   </script>
 </head>
 <body>
@@ -264,7 +268,7 @@ button:disabled .loader { display: block; }
     </div>
   </div>
 
-  <main class="container">
+  <main class="container" style="display:none">
     <section class="queue-panel">
       <header class="panel-header">
         <h2>ТЕКУЩАЯ ОЧЕРЕДЬ</h2>
@@ -303,9 +307,9 @@ button:disabled .loader { display: block; }
             <span class="talon-title">ТАЛОН</span>
           </div>
           <div class="talon-body">
-            <span class="талон-label">Имя:</span>
+            <span class="talon-label">Имя:</span>
             <span id="talon-name"></span>
-            <span class="талон-label">Номер в очереди:</span>
+            <span class="talon-label">Номер в очереди:</span>
             <span id="talon-number" class="talon-number-large"></span>
           </div>
           <div class="talon-footer">Вы в очереди</div>
@@ -320,17 +324,16 @@ button:disabled .loader { display: block; }
   <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
 
-  <!-- ===== РАСПИСАНИЕ ДОСТУПА (только по schedule.json, без открытия по фолбэку) ===== -->
+  <!-- ===== РАСПИСАНИЕ (только из schedule.json, без открытия по фолбэку) ===== -->
   <script>
-/* Фолбэк-правила показываем только на оверлее (как справку), НО не открываем по ним сайт */
 const FALLBACK_RULES = {
   timeZone: 'Europe/Moscow',
   windows: [{ days: [6], start: '13:20', end: '15:30' }],
   message: 'Сейчас не время :)'
 };
-
-let __RULES_READY__ = false; // пришёл ли первый schedule.json
-let __LAST_OPEN__   = false; // предыдущее состояние
+let __LAST_OPEN__   = false;
+let __countdownInterval = null;
+let __boundaryTimeout   = null;
 
 function parseHM(hm){ const [h,m]=hm.split(':').map(Number); return h*60+m; }
 function getZonedNowParts(tz) {
@@ -359,18 +362,12 @@ function renderSchedule(rules) {
   const el = document.getElementById('closed-schedule');
   if (el) el.textContent = text ? `График: ${text}` : '';
 }
-
-/* === Таймер/границы окна === */
-let __countdownInterval = null;
-let __boundaryTimeout   = null;
-
 function msUntilNextBoundary(rules) {
   const { timeZone, windows } = rules;
   const now = new Date();
   const fmtDOW = new Intl.DateTimeFormat('en-US',  { timeZone: timeZone === 'local' ? undefined : timeZone, weekday: 'short' });
   const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
   const dow = dowMap[fmtDOW.format(now)];
-
   function dateAt(dayOffset, minutesFromMidnight){
     const base = new Date(now.getTime() + dayOffset*24*60*60*1000);
     const y = new Intl.DateTimeFormat('en-CA',{ timeZone: timeZone==='local'?undefined:timeZone, year:'numeric'}).format(base);
@@ -380,7 +377,6 @@ function msUntilNextBoundary(rules) {
     const mm = String(minutesFromMidnight%60).padStart(2,'0');
     return new Date(`${y}-${m}-${d}T${hh}:${mm}:00`);
   }
-
   const candidates = [];
   for (let dOff = 0; dOff < 8; dOff++){
     const thisDow = (dow + dOff) % 7;
@@ -415,7 +411,6 @@ function planBoundaryAndMaybeCountdown(rules) {
   clearBoundaryTimers();
   const { ms } = msUntilNextBoundary(rules);
   if (ms == null) return;
-
   const el = document.getElementById('reopen-countdown');
   if (!window.__SITE_OPEN__ && el) {
     let remain = ms;
@@ -424,19 +419,21 @@ function planBoundaryAndMaybeCountdown(rules) {
       remain -= 1000;
       if (remain <= 0) {
         clearBoundaryTimers();
-        location.reload();
+        // просто перевычислим состояние при следующем опросе — тут без reload
+        el.textContent = 'Открываем...';
       } else {
         el.textContent = `Откроется через: ${formatDuration(remain)}`;
       }
     }, 1000);
   }
   const BUFFER_MS = 1000;
-  __boundaryTimeout = setTimeout(() => location.reload(), Math.max(0, ms + BUFFER_MS));
+  __boundaryTimeout = setTimeout(() => {
+    // мягко подтянем новые правила и применим
+    fetchRemoteRules().then(r => r && applyRulesAndReact(r));
+  }, Math.max(0, ms + BUFFER_MS));
 }
 
-/* === schedule.json === */
 const SCHEDULE_URL = 'schedule.json';
-
 async function fetchRemoteRules() {
   try {
     const res = await fetch(SCHEDULE_URL + '?t=' + Date.now(), {
@@ -445,16 +442,11 @@ async function fetchRemoteRules() {
     });
     if (!res.ok) return null;
     return await res.json();
-  } catch (e) {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/* === Применение правил без «моргающего» фолбэка === */
 function applyRulesAndReact(remoteRules) {
   if (!remoteRules) return;
-
-  __RULES_READY__ = true;
 
   const nowOpen  = isOpenNow(remoteRules);
   const overlay  = document.getElementById('closed-overlay');
@@ -466,15 +458,18 @@ function applyRulesAndReact(remoteRules) {
     window.__BLOCK_INIT__ = !nowOpen;
 
     if (nowOpen) {
+      // показать контент без перезагрузки
       overlay?.classList.remove('active');
       container?.classList.remove('hidden');
       container?.removeAttribute('inert');
-      // впервые перешли в открытое состояние — перезагружаемся, чтобы стартанул Firebase-блок
-      location.reload();
+      container?.style.removeProperty('display'); // снять inline display:none
+      if (typeof window.startQueueApp === 'function') window.startQueueApp(); // стартуем Firebase один раз
     } else {
+      // закрыть контент без перезагрузки
       overlay?.classList.add('active');
       container?.classList.add('hidden');
       container?.setAttribute('inert','');
+      container?.style.setProperty('display','none'); // чтобы не мигало на перерисовке
       if (title && remoteRules.message) title.textContent = remoteRules.message;
     }
   }
@@ -483,21 +478,20 @@ function applyRulesAndReact(remoteRules) {
   planBoundaryAndMaybeCountdown(remoteRules);
 
   __LAST_OPEN__ = nowOpen;
+
+  // снимаем бут-стиль один раз, когда мы явно показали закрыто или открыто по удалённым правилам
+  const boot = document.getElementById('boot-style');
+  if (boot) boot.remove();
 }
 
-/* === Старт: всегда закрыто до прихода удалённых правил === */
 document.addEventListener('DOMContentLoaded', () => {
+  // Стартуем закрытыми и показываем фолбэк-график
   const overlay = document.getElementById('closed-overlay');
   const container = document.querySelector('.container');
-
   overlay?.classList.add('active');
   container?.classList.add('hidden');
   container?.setAttribute('inert','');
-
-  renderSchedule(FALLBACK_RULES); // показываем график из фолбэка как подсказку
-
-  const boot = document.getElementById('boot-style'); // снимаем бут-стиль после явного закрытия
-  if (boot) boot.remove();
+  renderSchedule(FALLBACK_RULES);
 
   (async function startWatcher(pollMs = 5000){
     const first = await fetchRemoteRules();
@@ -510,228 +504,225 @@ document.addEventListener('DOMContentLoaded', () => {
 });
   </script>
 
-  <!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ (инициализируется только когда открыто) ===== -->
+  <!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ (стартуем вызовом startQueueApp()) ===== -->
   <script>
-(function() {
+(function(){
   'use strict';
 
-  if (window.__BLOCK_INIT__) { 
-    console.log('App init skipped: outside of allowed time window.');
-    return; 
-  }
-  
-  // === FIREBASE ===
-  const firebaseConfig = {
-    apiKey: "AIzaSyBv6hJVtMFETIRW-QUVRSKh73bmm9b4zEM",
-    authDomain: "talony-fd34c.firebaseapp.com",
-    projectId: "talony-fd34c",
-    storageBucket: "talony-fd34c.firebasestorage.app",
-    messagingSenderId: "806366155366",
-    appId: "1:806366155366:web:c8ce518f0be3561bd6d3a7"
-  };
+  // Запуск основного приложения по требованию (когда открыто)
+  window.startQueueApp = function startQueueApp(){
+    if (window.__APP_STARTED__) return;
+    window.__APP_STARTED__ = true;
 
-  firebase.initializeApp(firebaseConfig);
-  const db = firebase.firestore();
-  const queueCollection = db.collection('queue');
+    // === FIREBASE ===
+    const firebaseConfig = {
+      apiKey: "AIzaSyBv6hJVtMFETIRW-QUVRSKh73bmm9b4zEM",
+      authDomain: "talony-fd34c.firebaseapp.com",
+      projectId: "talony-fd34c",
+      storageBucket: "talony-fd34c.firebasestorage.app",
+      messagingSenderId: "806366155366",
+      appId: "1:806366155366:web:c8ce518f0be3561bd6d3a7"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const queueCollection = db.collection('queue');
 
-  const STORAGE_KEY_ID = 'myQueueTalonId';
-  const STORAGE_KEY_NAME = 'myQueueTalonName';
-  const STORAGE_KEY_LAST_CLEANUP = 'myQueueLastCleanup';
+    const STORAGE_KEY_ID = 'myQueueTalonId';
+    const STORAGE_KEY_NAME = 'myQueueTalonName';
+    const STORAGE_KEY_LAST_CLEANUP = 'myQueueLastCleanup';
 
-  let currentUserTalonId = null;
-  const dom = {};
+    let currentUserTalonId = null;
+    const dom = {};
 
-  const UI = {
-    renderQueue: (queueData) => {
-      dom.queueList.innerHTML = ''; 
-      if (queueData.length === 0) dom.emptyMessage.classList.remove('hidden');
-      else dom.emptyMessage.classList.add('hidden');
+    const UI = {
+      renderQueue: (queueData) => {
+        dom.queueList.innerHTML = ''; 
+        if (queueData.length === 0) dom.emptyMessage.classList.remove('hidden');
+        else dom.emptyMessage.classList.add('hidden');
 
-      const fragment = document.createDocumentFragment();
-      let userNumberInQueue = null;
-      let userTalonStillExists = false;
-      
-      queueData.forEach((item, index) => {
-        if (item.id === currentUserTalonId) {
-          userNumberInQueue = index + 1;
-          userTalonStillExists = true;
-        }
-        const li = document.createElement('li');
-        const numberSpan = document.createElement('span');
-        numberSpan.className = 'queue-number';
-        numberSpan.textContent = `#${index + 1}`;
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'queue-name';
-        nameSpan.textContent = item.name;
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'queue-time';
-        if (item.timestamp) {
-          const date = item.timestamp.toDate();
-          timeSpan.textContent = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-        }
-        li.appendChild(numberSpan);
-        li.appendChild(nameSpan);
-        li.appendChild(timeSpan);
-        fragment.appendChild(li);
-      });
-      dom.queueList.appendChild(fragment);
-
-      if (currentUserTalonId && !userTalonStillExists) {
-        console.warn("Сохраненный талон не найден в очереди. Сброс.");
-        UI.resetForm();
-      } else if (userNumberInQueue) {
-        UI.updateTalonNumber(userNumberInQueue);
-      }
-    },
-    updateTalonNumber: (number) => { if (dom.talonNumber) dom.talonNumber.textContent = `#${number}`; },
-    showQueueLoading: (isLoading) => { dom.queueLoader.classList.toggle('active', isLoading); },
-    setFormLoading: (isLoading) => {
-      dom.submitButton.disabled = isLoading;
-      dom.nameInput.disabled = isLoading;
-      dom.buttonText.textContent = isLoading ? 'РЕГИСТРАЦИЯ...' : 'ВЗЯТЬ ТАЛОН';
-    },
-    setTalonLoading: (isLoading) => {
-      if (dom.deleteButton) {
-        dom.deleteButton.disabled = isLoading;
-        dom.deleteButton.textContent = isLoading ? 'ВЫХОДИМ...' : 'Выйти из очереди';
-      }
-    },
-    showFormError: (message) => {
-      dom.formError.textContent = message;
-      dom.formError.style.display = message ? 'block' : 'none';
-    },
-    showTalon: (name, docId) => {
-      currentUserTalonId = docId; 
-      dom.talonName.textContent = name;
-      dom.talonNumber.textContent = '#...'; 
-      dom.formContainer.classList.add('hidden');
-      dom.talonContainer.classList.remove('hidden');
-    },
-    resetForm: () => {
-      currentUserTalonId = null; 
-      localStorage.removeItem(STORAGE_KEY_ID);
-      localStorage.removeItem(STORAGE_KEY_NAME);
-      dom.formContainer.classList.remove('hidden');
-      dom.talonContainer.classList.add('hidden');
-      dom.nameInput.value = '';
-      UI.showFormError(null);
-    }
-  };
-
-  const API = {
-    listenForQueueChanges: () => {
-      UI.showQueueLoading(true);
-      queueCollection.orderBy('timestamp', 'asc').onSnapshot(
-        (snapshot) => {
-          const queueData = [];
-          snapshot.forEach((doc) => queueData.push({ id: doc.id, ...doc.data() }));
-          UI.renderQueue(queueData);
-          UI.showQueueLoading(false);
-        }, 
-        (error) => {
-          console.error("Ошибка real-time подписки:", error);
-          UI.showFormError("Ошибка: не могу обновить очередь.");
-          UI.showQueueLoading(false);
-        }
-      );
-    },
-    addTalon: async (name) => {
-      UI.setFormLoading(true);
-      UI.showFormError(null);
-      try {
-        const docRef = await queueCollection.add({
-          name, timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        const fragment = document.createDocumentFragment();
+        let userNumberInQueue = null;
+        let userTalonStillExists = false;
+        
+        queueData.forEach((item, index) => {
+          if (item.id === currentUserTalonId) { userNumberInQueue = index + 1; userTalonStillExists = true; }
+          const li = document.createElement('li');
+          const numberSpan = document.createElement('span');
+          numberSpan.className = 'queue-number';
+          numberSpan.textContent = `#${index + 1}`;
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'queue-name';
+          nameSpan.textContent = item.name;
+          const timeSpan = document.createElement('span');
+          timeSpan.className = 'queue-time';
+          if (item.timestamp) {
+            const date = item.timestamp.toDate();
+            timeSpan.textContent = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+          }
+          li.appendChild(numberSpan);
+          li.appendChild(nameSpan);
+          li.appendChild(timeSpan);
+          fragment.appendChild(li);
         });
-        localStorage.setItem(STORAGE_KEY_ID, docRef.id);
-        localStorage.setItem(STORAGE_KEY_NAME, name);
-        UI.showTalon(name, docRef.id);
-      } catch (error) {
-        console.error('Ошибка при добавлении талона:', error);
-        UI.showFormError(`Ошибка: ${error.message}`);
-      } finally { UI.setFormLoading(false); }
-    },
-    deleteTalon: async () => {
-      if (!currentUserTalonId) return;
-      UI.setTalonLoading(true); UI.showFormError(null);
-      try { await queueCollection.doc(currentUserTalonId).delete(); UI.resetForm(); }
-      catch (error) { console.error('Ошибка при удалении талона:', error); UI.showFormError(`Ошибка: ${error.message}`); }
-      finally { UI.setTalonLoading(false); }
-    },
-    deleteOldTalons: async () => {
-      try {
-        const fiveHoursAgo = firebase.firestore.Timestamp.fromMillis(Date.now() - (5 * 60 * 60 * 1000));
-        const snapshot = await queueCollection.where("timestamp", "<", fiveHoursAgo).get();
-        if (snapshot.empty) return;
-        const batch = db.batch();
-        snapshot.forEach(doc => batch.delete(doc.ref));
-        await batch.commit();
-      } catch (error) {
-        console.error("Ошибка во время чистки:", error);
+        dom.queueList.appendChild(fragment);
+
+        if (currentUserTalonId && !userTalonStillExists) { UI.resetForm(); }
+        else if (userNumberInQueue) { UI.updateTalonNumber(userNumberInQueue); }
+      },
+      updateTalonNumber: (number) => { if (dom.talonNumber) dom.talonNumber.textContent = `#${number}`; },
+      showQueueLoading: (isLoading) => { dom.queueLoader.classList.toggle('active', isLoading); },
+      setFormLoading: (isLoading) => {
+        dom.submitButton.disabled = isLoading;
+        dom.nameInput.disabled = isLoading;
+        dom.buttonText.textContent = isLoading ? 'РЕГИСТРАЦИЯ...' : 'ВЗЯТЬ ТАЛОН';
+      },
+      setTalonLoading: (isLoading) => {
+        if (dom.deleteButton) {
+          dom.deleteButton.disabled = isLoading;
+          dom.deleteButton.textContent = isLoading ? 'ВЫХОДИМ...' : 'Выйти из очереди';
+        }
+      },
+      showFormError: (message) => {
+        dom.formError.textContent = message;
+        dom.formError.style.display = message ? 'block' : 'none';
+      },
+      showTalon: (name, docId) => {
+        currentUserTalonId = docId; 
+        dom.talonName.textContent = name;
+        dom.talonNumber.textContent = '#...'; 
+        dom.formContainer.classList.add('hidden');
+        dom.talonContainer.classList.remove('hidden');
+      },
+      resetForm: () => {
+        currentUserTalonId = null; 
+        localStorage.removeItem(STORAGE_KEY_ID);
+        localStorage.removeItem(STORAGE_KEY_NAME);
+        dom.formContainer.classList.remove('hidden');
+        dom.talonContainer.classList.add('hidden');
+        dom.nameInput.value = '';
+        UI.showFormError(null);
+      }
+    };
+
+    const API = {
+      listenForQueueChanges: () => {
+        UI.showQueueLoading(true);
+        queueCollection.orderBy('timestamp', 'asc').onSnapshot(
+          (snapshot) => {
+            const queueData = [];
+            snapshot.forEach((doc) => queueData.push({ id: doc.id, ...doc.data() }));
+            UI.renderQueue(queueData);
+            UI.showQueueLoading(false);
+          }, 
+          (error) => {
+            console.error("Ошибка real-time подписки:", error);
+            UI.showFormError("Ошибка: не могу обновить очередь.");
+            UI.showQueueLoading(false);
+          }
+        );
+      },
+      addTalon: async (name) => {
+        UI.setFormLoading(true);
+        UI.showFormError(null);
+        try {
+          const docRef = await queueCollection.add({
+            name, timestamp: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          localStorage.setItem(STORAGE_KEY_ID, docRef.id);
+          localStorage.setItem(STORAGE_KEY_NAME, name);
+          UI.showTalon(name, docRef.id);
+        } catch (error) {
+          console.error('Ошибка при добавлении талона:', error);
+          UI.showFormError(`Ошибка: ${error.message}`);
+        } finally { UI.setFormLoading(false); }
+      },
+      deleteTalon: async () => {
+        if (!currentUserTalonId) return;
+        UI.setTalonLoading(true); UI.showFormError(null);
+        try { await queueCollection.doc(currentUserTalonId).delete(); UI.resetForm(); }
+        catch (error) { console.error('Ошибка при удалении талона:', error); UI.showFormError(`Ошибка: ${error.message}`); }
+        finally { UI.setTalonLoading(false); }
+      },
+      deleteOldTalons: async () => {
+        try {
+          const fiveHoursAgo = firebase.firestore.Timestamp.fromMillis(Date.now() - (5 * 60 * 60 * 1000));
+          const snapshot = await queueCollection.where("timestamp", "<", fiveHoursAgo).get();
+          if (snapshot.empty) return;
+          const batch = db.batch();
+          snapshot.forEach(doc => batch.delete(doc.ref));
+          await batch.commit();
+        } catch (error) {
+          console.error("Ошибка во время чистки:", error);
+        }
+      }
+    };
+
+    const Handlers = {
+      handleFormSubmit: (event) => {
+        event.preventDefault();
+        const name = dom.nameInput.value.trim();
+        if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
+        if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
+        API.addTalon(name);
+      },
+      handleDeleteClick: () => API.deleteTalon(),
+      handleSkipClick: async () => {
+        if (!currentUserTalonId) return;
+        const docRef = queueCollection.doc(currentUserTalonId);
+        await docRef.update({ timestamp: firebase.firestore.FieldValue.serverTimestamp() });
+      }
+    };
+
+    function cacheDomElements() {
+      dom.queueList = document.getElementById('queue-list');
+      dom.queueLoader = document.getElementById('queue-loader');
+      dom.emptyMessage = document.getElementById('empty-queue-message');
+      dom.formPanel = document.getElementById('form-panel');
+      dom.formContainer = document.getElementById('form-container');
+      dom.talonForm = document.getElementById('talon-form');
+      dom.nameInput = document.getElementById('name-input');
+      dom.submitButton = document.getElementById('submit-button');
+      dom.buttonText = document.querySelector('#submit-button .button-text');
+      dom.formError = document.getElementById('form-error');
+      dom.talonContainer = document.getElementById('talon-container');
+      dom.talonName = document.getElementById('talon-name');
+      dom.talonNumber = document.getElementById('talon-number');
+      dom.deleteButton = document.getElementById('delete-button');
+      dom.skipButton = document.getElementById('skip-button');
+    }
+
+    function init() {
+      cacheDomElements();
+      if (dom.talonForm) dom.talonForm.addEventListener('submit', Handlers.handleFormSubmit);
+      if (dom.deleteButton) dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
+      if (dom.skipButton) dom.skipButton.addEventListener('click', Handlers.handleSkipClick);
+      API.listenForQueueChanges();
+
+      const id = localStorage.getItem(STORAGE_KEY_ID);
+      const name = localStorage.getItem(STORAGE_KEY_NAME);
+      if (id && name) UI.showTalon(name, id);
+
+      const oneHourInMillis = 60 * 60 * 1000;
+      const lastCleanup = localStorage.getItem(STORAGE_KEY_LAST_CLEANUP);
+      const now = Date.now();
+      if (!lastCleanup || (now - new Date(lastCleanup).getTime()) > oneHourInMillis) {
+        API.deleteOldTalons().then(() => {
+          localStorage.setItem(STORAGE_KEY_LAST_CLEANUP, new Date().toISOString());
+        });
       }
     }
-  };
 
-  const Handlers = {
-    handleFormSubmit: (event) => {
-      event.preventDefault();
-      const name = dom.nameInput.value.trim();
-      if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
-      if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
-      API.addTalon(name);
-    },
-    handleDeleteClick: () => API.deleteTalon(),
-    // «Пропустить 1 человека»: обновляем timestamp -> уходим вниз
-    handleSkipClick: async () => {
-      if (!currentUserTalonId) return;
-      const docRef = queueCollection.doc(currentUserTalonId);
-      await docRef.update({ timestamp: firebase.firestore.FieldValue.serverTimestamp() });
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
     }
   };
-  
-  function cacheDomElements() {
-    dom.queueList = document.getElementById('queue-list');
-    dom.queueLoader = document.getElementById('queue-loader');
-    dom.emptyMessage = document.getElementById('empty-queue-message');
-    dom.formPanel = document.getElementById('form-panel');
-    dom.formContainer = document.getElementById('form-container');
-    dom.talonForm = document.getElementById('talon-form');
-    dom.nameInput = document.getElementById('name-input');
-    dom.submitButton = document.getElementById('submit-button');
-    dom.buttonText = document.querySelector('#submit-button .button-text');
-    dom.formError = document.getElementById('form-error');
-    dom.talonContainer = document.getElementById('talon-container');
-    dom.talonName = document.getElementById('talon-name');
-    dom.talonNumber = document.getElementById('talon-number');
-    dom.deleteButton = document.getElementById('delete-button');
-    dom.skipButton = document.getElementById('skip-button');
+
+  // Если страница уже открыта на момент парсинга — запустим сразу
+  if (!window.__BLOCK_INIT__) {
+    window.startQueueApp();
   }
-
-  function init() {
-    console.log('Queue App Initialized (Firebase Mode).');
-    cacheDomElements(); 
-    if (dom.talonForm) dom.talonForm.addEventListener('submit', Handlers.handleFormSubmit);
-    if (dom.deleteButton) dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
-    if (dom.skipButton) dom.skipButton.addEventListener('click', Handlers.handleSkipClick);
-    API.listenForQueueChanges();
-
-    const storedId = localStorage.getItem(STORAGE_KEY_ID);
-    const storedName = localStorage.getItem(STORAGE_KEY_NAME);
-    if (storedId && storedName) {
-      console.log(`Найден сохраненный талон: ${storedId}`);
-      UI.showTalon(storedName, storedId); 
-    }
-
-    const oneHourInMillis = 60 * 60 * 1000;
-    const lastCleanup = localStorage.getItem(STORAGE_KEY_LAST_CLEANUP);
-    const now = Date.now();
-    if (!lastCleanup || (now - new Date(lastCleanup).getTime()) > oneHourInMillis) {
-      API.deleteOldTalons().then(() => {
-        localStorage.setItem(STORAGE_KEY_LAST_CLEANUP, new Date().toISOString());
-      });
-    }
-  }
-
-  document.addEventListener('DOMContentLoaded', init);
 })();
   </script>
 </body>
