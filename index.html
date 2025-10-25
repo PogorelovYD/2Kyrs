@@ -79,7 +79,7 @@ h2 {
 }
 .panel-header {
   padding: 1.5rem; border-bottom: 1px solid var(--color-border);
-  display: flex; justify-content: space-between; align-items: center;
+  display: flex; justify-content: space между; align-items: center;
 }
 .queue-list-container {
   padding: 1rem 0; flex-grow: 1; position: relative;
@@ -239,7 +239,7 @@ button:disabled .loader { display: block; }
             <span class="talon-title">ТАЛОН</span>
           </div>
           <div class="talon-body">
-            <span class="talon-label">Имя:</span>
+            <span class="талон-label">Имя:</span>
             <span id="talon-name"></span>
             <span class="talon-label">Номер в очереди:</span>
             <span id="talon-number" class="talon-number-large"></span>
@@ -448,6 +448,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
         if (queueData.length === 0) dom.emptyMessage.classList.remove('hidden');
         else dom.emptyMessage.classList.add('hidden');
 
+        /* --- добавлено: сохраняем локальный отсортированный список --- */
+        dom.__lastQueue = queueData.map(x => ({ id: x.id, orderKey: x.orderKey }));
+        /* -------------------------------------------------------------- */
+
         const fragment = document.createDocumentFragment();
         let userNumberInQueue = null;
         let userTalonStillExists = false;
@@ -588,41 +592,50 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       handleDeleteClick: () => API.deleteTalon(),
 
-      // === ИЗМЕНЕНО: пропустить РОВНО 1 — свап orderKey ===
+      // === ПРОПУСТИТЬ РОВНО 1: без лишнего запроса, свап по локальному списку ===
       handleSkipClick: async () => {
         if (!currentUserTalonId) return;
 
+        // Берём уже отрисованный локальный список (он отсортирован по orderKey)
+        const q = Array.isArray(dom.__lastQueue) ? dom.__lastQueue : [];
+        const myIdx = q.findIndex(it => it.id === currentUserTalonId);
+        if (myIdx === -1) {
+          UI.showFormError('Не нашли ваш талон в очереди. Обновите страницу.');
+          setTimeout(()=>UI.showFormError(''), 1800);
+          return;
+        }
+        if (myIdx === q.length - 1) {
+          UI.showFormError('Вы уже последний в очереди.');
+          setTimeout(()=>UI.showFormError(''), 1500);
+          return;
+        }
+
+        const nextId = q[myIdx + 1]?.id;
+        if (!nextId) return;
+
         const userRef = queueCollection.doc(currentUserTalonId);
+        const nextRef = queueCollection.doc(nextId);
+
+        // Оптимистичная обратная связь на кнопке
+        const oldSkipText = dom.skipButton?.textContent;
+        if (dom.skipButton) {
+          dom.skipButton.disabled = true;
+          dom.skipButton.textContent = 'Пропускаем…';
+        }
 
         try {
-          const userSnap = await userRef.get();
-          if (!userSnap.exists) throw new Error('Ваш талон не найден.');
-          const myKey = userSnap.get('orderKey');
-          if (typeof myKey !== 'number') throw new Error('Подождите секунду, идёт инициализация…');
-
-          // следующий по orderKey
-          const nextQS = await queueCollection
-            .orderBy('orderKey', 'asc')
-            .startAfter(myKey)
-            .limit(1)
-            .get();
-
-          if (nextQS.empty) {
-            UI.showFormError('Вы уже последний в очереди.');
-            setTimeout(()=>UI.showFormError(''), 1500);
-            return;
-          }
-
-          const nextRef = nextQS.docs[0].ref;
-
-          // атомарный свап ключей порядка
+          // Транзакция: читаем РОВНО два документа и меняем их orderKey местами
           await firebase.firestore().runTransaction(async (tx) => {
             const [uS, nS] = await Promise.all([tx.get(userRef), tx.get(nextRef)]);
             if (!uS.exists || !nS.exists) throw new Error('Очередь обновляется, попробуйте ещё раз.');
+
             const a = uS.get('orderKey');
             const b = nS.get('orderKey');
-            if (typeof a !== 'number' || typeof b !== 'number') throw new Error('Подождите, данные ещё сохраняются…');
+            if (typeof a !== 'number' || typeof b !== 'number') {
+              throw new Error('Подождите, данные ещё сохраняются…');
+            }
 
+            // атомарный свап
             tx.update(userRef, { orderKey: b });
             tx.update(nextRef, { orderKey: a });
           });
@@ -630,7 +643,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
         } catch (err) {
           console.error(err);
           UI.showFormError(err.message || 'Не удалось пропустить. Попробуйте ещё раз.');
-          setTimeout(()=>UI.showFormError(''),2000);
+          setTimeout(()=>UI.showFormError(''), 2000);
+        } finally {
+          if (dom.skipButton) {
+            dom.skipButton.disabled = false;
+            dom.skipButton.textContent = oldSkipText || 'Пропустить 1 человека';
+          }
         }
       }
     };
