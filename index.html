@@ -298,6 +298,7 @@ button:disabled .loader { display: block; }
                     <div class="talon-footer">Вы в очереди</div>
                 </div>
                 <button id="delete-button" class="button-secondary button-danger">Выйти из очереди</button>
+                <button id="skip-button" class="button-secondary">Пропустить 1 человека</button>
             </div>
         </section>
     </main>
@@ -314,7 +315,7 @@ button:disabled .loader { display: block; }
       timeZone: 'Europe/Moscow',
       // Окна доступности (0=вс, 1=пн, ... , 6=сб)
       windows: [
-        { days: [3], start: '12:40', end: '15:30' }, // Пн–Пт 09:00–18:00
+        { days: [6], start: '12:00', end: '15:30' }, // Пн–Пт 09:00–18:00
         // { days: [6], start: '10:00', end: '14:00' },     // Пример: Сб 10:00–14:00
       ],
       message: 'Сейчас не время :)'
@@ -541,15 +542,27 @@ button:disabled .loader { display: block; }
         };
 
         const Handlers = {
-            handleFormSubmit: (event) => {
-                event.preventDefault();
-                const name = dom.nameInput.value.trim();
-                if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
-                if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
-                API.addTalon(name);
-            },
-            handleDeleteClick: () => API.deleteTalon()
-        };
+    handleFormSubmit: (event) => {
+        event.preventDefault();
+        const name = dom.nameInput.value.trim();
+        if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
+        if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
+        API.addTalon(name);
+    },
+
+    handleDeleteClick: () => API.deleteTalon(),
+
+    // ==== НОВАЯ ФУНКЦИЯ (кнопка "Пропустить 1 человека") ====
+    handleSkipClick: async () => {
+        if (!currentUserTalonId) return;
+        // получаем ссылку на свой документ
+        const docRef = queueCollection.doc(currentUserTalonId);
+        // обновляем timestamp => документ уходит вниз на одно место
+        await docRef.update({
+            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    }
+};
         
         function cacheDomElements() {
             dom.queueList = document.getElementById('queue-list');
@@ -566,6 +579,7 @@ button:disabled .loader { display: block; }
             dom.talonName = document.getElementById('talon-name');
             dom.talonNumber = document.getElementById('talon-number');
             dom.deleteButton = document.getElementById('delete-button');
+            dom.skipButton = document.getElementById('skip-button');
         }
 
         function init() {
@@ -573,6 +587,7 @@ button:disabled .loader { display: block; }
             cacheDomElements(); 
             if (dom.talonForm) dom.talonForm.addEventListener('submit', Handlers.handleFormSubmit);
             if (dom.deleteButton) dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
+            if (dom.skipButton) dom.skipButton.addEventListener('click', Handlers.handleSkipClick);
             API.listenForQueueChanges();
 
             const storedId = localStorage.getItem(STORAGE_KEY_ID);
@@ -597,6 +612,7 @@ button:disabled .loader { display: block; }
     </script>
 </body>
 </html>
+
 
 
 
