@@ -244,6 +244,7 @@ button:disabled .loader { display: block; }
                 Загляните, пожалуйста, на пару.
             </div>
             <div class="closed-schedule" id="closed-schedule"></div>
+            <div id="reopen-countdown"></div> <!-- таймер обратного отсчёта -->
         </div>
     </div>
 
@@ -315,8 +316,8 @@ button:disabled .loader { display: block; }
       timeZone: 'Europe/Moscow',
       // Окна доступности (0=вс, 1=пн, ... , 6=сб)
       windows: [
-        { days: [3], start: '12:40', end: '15:30' }, // Пн–Пт 09:00–18:00
-        // { days: [6], start: '10:00', end: '14:00' },     // Пример: Сб 10:00–14:00
+        { days: [6], start: '12:40', end: '15:30' }, // ваши значения
+        // { days: [6], start: '10:00', end: '14:00' },
       ],
       message: 'Сейчас не время :)'
     };
@@ -354,18 +355,82 @@ button:disabled .loader { display: block; }
       const el = document.getElementById('closed-schedule');
       if (el) el.textContent = text ? `График: ${text}` : '';
     }
-    // === Наблюдатель за сменой окна доступности  (НОВАЯ ЧАСТЬ) ===
-    function startScheduleWatcher(intervalMs = 10000) {
-      let lastState = isOpenNow(); // true = открыт, false = закрыт
-      setInterval(() => {
-        const nowState = isOpenNow();
-        if (nowState !== lastState) {
-          location.reload(); // ← авто обновление
+
+    /* === НОВОЕ: ближайшая граница окна и таймер/автоперезагрузка === */
+    function msUntilNextBoundary(rules = ACCESS_RULES) {
+      const { timeZone, windows } = rules;
+      const now = new Date();
+
+      const fmtHM  = new Intl.DateTimeFormat('ru-RU', { timeZone: timeZone === 'local' ? undefined : timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+      const fmtDOW = new Intl.DateTimeFormat('en-US',  { timeZone: timeZone === 'local' ? undefined : timeZone, weekday: 'short' });
+
+      const parts = fmtHM.formatToParts(now).reduce((a,p)=>{a[p.type]=p.value;return a;}, {});
+      const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
+      const dow = dowMap[fmtDOW.format(now)];
+
+      function dateAt(dayOffset, minutesFromMidnight){
+        const base = new Date(now.getTime() + dayOffset*24*60*60*1000);
+        const y = new Intl.DateTimeFormat('en-CA',{ timeZone: timeZone==='local'?undefined:timeZone, year:'numeric'}).format(base);
+        const m = new Intl.DateTimeFormat('en-CA',{ timeZone: timeZone==='local'?undefined:timeZone, month:'2-digit'}).format(base);
+        const d = new Intl.DateTimeFormat('en-CA',{ timeZone: timeZone==='local'?undefined:timeZone, day:'2-digit'}).format(base);
+        const hh = String(Math.floor(minutesFromMidnight/60)).padStart(2,'0');
+        const mm = String(minutesFromMidnight%60).padStart(2,'0');
+        return new Date(`${y}-${m}-${d}T${hh}:${mm}:00`);
+      }
+
+      const candidates = [];
+      for (let dOff = 0; dOff < 8; dOff++){
+        const thisDow = (dow + dOff) % 7;
+        const todays = windows.filter(w => w.days.includes(thisDow));
+        for (const w of todays){
+          const s = parseHM(w.start);
+          const e = parseHM(w.end);
+          const sDate = dateAt(dOff, s);
+          const eDate = dateAt(dOff, e);
+          if (sDate.getTime() > now.getTime()) candidates.push(sDate.getTime());
+          if (eDate.getTime() > now.getTime()) candidates.push(eDate.getTime());
         }
-        lastState = nowState;
-      }, intervalMs);
+      }
+      if (!candidates.length) return null;
+      const nextTs = Math.min(...candidates);
+      return nextTs - now.getTime();
     }
-        
+
+    function formatDuration(ms){
+      if (ms < 0) ms = 0;
+      const totalSec = Math.floor(ms / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      const pad = n => String(n).padStart(2,'0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    }
+
+    function startScheduleAutoReloadWithCountdown() {
+      const ms = msUntilNextBoundary(ACCESS_RULES);
+      if (ms == null) return;
+
+      const el = document.getElementById('reopen-countdown');
+      if (!window.__SITE_OPEN__ && el) {
+        // Сайт закрыт: показываем обратный отсчёт до открытия
+        let remain = ms;
+        el.textContent = `Откроется через: ${formatDuration(remain)}`;
+        const tick = setInterval(() => {
+          remain -= 1000;
+          if (remain <= 0) {
+            clearInterval(tick);
+            location.reload(); // в ноль — перезагрузка, сайт откроется
+          } else {
+            el.textContent = `Откроется через: ${formatDuration(remain)}`;
+          }
+        }, 1000);
+      } else {
+        // Сайт открыт: всё равно перезагрузим ровно в момент следующей границы
+        const BUFFER_MS = 1000;
+        setTimeout(() => location.reload(), Math.max(0, ms + BUFFER_MS));
+      }
+    }
+    /* === /НОВОЕ === */
 
     // Флаг, чтобы остальной код (Firebase и т.д.) не стартовал
     window.__SITE_OPEN__ = isOpenNow();
@@ -388,9 +453,9 @@ button:disabled .loader { display: block; }
         const title = overlay?.querySelector('.closed-title');
         if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
       }
-        
-        // <<< НОВАЯ СТРОКА (запускаем авто-обновление)
-  startScheduleWatcher(10000);
+
+      // Запускаем таймер и точное автообновление
+      startScheduleAutoReloadWithCountdown();
     });
     </script>
 
@@ -557,27 +622,25 @@ button:disabled .loader { display: block; }
         };
 
         const Handlers = {
-    handleFormSubmit: (event) => {
-        event.preventDefault();
-        const name = dom.nameInput.value.trim();
-        if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
-        if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
-        API.addTalon(name);
-    },
+            handleFormSubmit: (event) => {
+                event.preventDefault();
+                const name = dom.nameInput.value.trim();
+                if (name.length < 2) return UI.showFormError('Имя должно содержать хотя бы 2 символа.');
+                if (name.length > 50) return UI.showFormError('Имя слишком длинное (макс. 50 символов).');
+                API.addTalon(name);
+            },
 
-    handleDeleteClick: () => API.deleteTalon(),
+            handleDeleteClick: () => API.deleteTalon(),
 
-    // ==== НОВАЯ ФУНКЦИЯ (кнопка "Пропустить 1 человека") ====
-    handleSkipClick: async () => {
-        if (!currentUserTalonId) return;
-        // получаем ссылку на свой документ
-        const docRef = queueCollection.doc(currentUserTalonId);
-        // обновляем timestamp => документ уходит вниз на одно место
-        await docRef.update({
-            timestamp: firebase.firestore.FieldValue.serverTimestamp()
-        });
-    }
-};
+            // ==== НОВАЯ ФУНКЦИЯ (кнопка "Пропустить 1 человека") ====
+            handleSkipClick: async () => {
+                if (!currentUserTalonId) return;
+                const docRef = queueCollection.doc(currentUserTalonId);
+                await docRef.update({
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+            }
+        };
         
         function cacheDomElements() {
             dom.queueList = document.getElementById('queue-list');
@@ -627,17 +690,3 @@ button:disabled .loader { display: block; }
     </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
