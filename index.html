@@ -140,7 +140,7 @@ button:disabled {
 }
 button .button-text { transition: opacity 0.2s ease; }
 button:disabled .button-text { opacity: 0; }
-.error-message {
+error-message {
     color: var(--color-error); text-shadow: 0 0 5px var(--color-error);
     font-size: 0.9rem; text-align: center; display: none; 
 }
@@ -316,7 +316,7 @@ button:disabled .loader { display: block; }
       timeZone: 'Europe/Moscow',
       // Окна доступности (0=вс, 1=пн, ... , 6=сб)
       windows: [
-        { days: [6], start: '13:20', end: '15:30' }, // ваши значения
+        { days: [6], start: '13:38', end: '15:30' }, // ваши значения
         // { days: [6], start: '10:00', end: '14:00' },
       ],
       message: 'Сейчас не время :)'
@@ -356,7 +356,11 @@ button:disabled .loader { display: block; }
       if (el) el.textContent = text ? `График: ${text}` : '';
     }
 
-    /* === НОВОЕ: ближайшая граница окна и таймер/автоперезагрузка === */
+    /* === НОВОЕ: ближайшая граница окна, отсчёт и автообновление + монитор === */
+    let __countdownInterval = null;
+    let __boundaryTimeout   = null;
+    let __lastPlannedBoundaryTs = null;
+
     function msUntilNextBoundary(rules = ACCESS_RULES) {
       const { timeZone, windows } = rules;
       const now = new Date();
@@ -391,9 +395,9 @@ button:disabled .loader { display: block; }
           if (eDate.getTime() > now.getTime()) candidates.push(eDate.getTime());
         }
       }
-      if (!candidates.length) return null;
+      if (!candidates.length) return { ms:null, ts:null };
       const nextTs = Math.min(...candidates);
-      return nextTs - now.getTime();
+      return { ms: nextTs - now.getTime(), ts: nextTs };
     }
 
     function formatDuration(ms){
@@ -406,29 +410,58 @@ button:disabled .loader { display: block; }
       return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
     }
 
-    function startScheduleAutoReloadWithCountdown() {
-      const ms = msUntilNextBoundary(ACCESS_RULES);
+    function clearBoundaryTimers(){
+      if (__countdownInterval) { clearInterval(__countdownInterval); __countdownInterval = null; }
+      if (__boundaryTimeout)   { clearTimeout(__boundaryTimeout);   __boundaryTimeout   = null; }
+    }
+
+    function planBoundaryAndMaybeCountdown() {
+      clearBoundaryTimers();
+      const { ms, ts } = msUntilNextBoundary(ACCESS_RULES);
       if (ms == null) return;
+      __lastPlannedBoundaryTs = ts;
 
       const el = document.getElementById('reopen-countdown');
       if (!window.__SITE_OPEN__ && el) {
-        // Сайт закрыт: показываем обратный отсчёт до открытия
+        // Сайт закрыт: показываем обратный отсчёт до ближайшего открытия
         let remain = ms;
         el.textContent = `Откроется через: ${formatDuration(remain)}`;
-        const tick = setInterval(() => {
+        __countdownInterval = setInterval(() => {
           remain -= 1000;
           if (remain <= 0) {
-            clearInterval(tick);
-            location.reload(); // в ноль — перезагрузка, сайт откроется
+            clearBoundaryTimers();
+            location.reload(); // в ноль — перезагрузка
           } else {
             el.textContent = `Откроется через: ${formatDuration(remain)}`;
           }
         }, 1000);
-      } else {
-        // Сайт открыт: всё равно перезагрузим ровно в момент следующей границы
-        const BUFFER_MS = 1000;
-        setTimeout(() => location.reload(), Math.max(0, ms + BUFFER_MS));
       }
+
+      // Точная перезагрузка ровно в момент границы
+      const BUFFER_MS = 1000;
+      __boundaryTimeout = setTimeout(() => location.reload(), Math.max(0, ms + BUFFER_MS));
+    }
+
+    // Монитор состояния/расписания: чтобы подхватывать правки времени без F5
+    function startScheduleMonitor(pollMs = 5000) {
+      let lastOpen = isOpenNow();
+      let lastPlannedTs = __lastPlannedBoundaryTs;
+
+      setInterval(() => {
+        const nowOpen = isOpenNow();
+        if (nowOpen !== lastOpen) {
+          location.reload();
+          return;
+        }
+        const { ts } = msUntilNextBoundary(ACCESS_RULES);
+        if (ts && lastPlannedTs && ts !== lastPlannedTs) {
+          planBoundaryAndMaybeCountdown();
+          lastPlannedTs = __lastPlannedBoundaryTs;
+        } else if (ts && !lastPlannedTs) {
+          planBoundaryAndMaybeCountdown();
+          lastPlannedTs = __lastPlannedBoundaryTs;
+        }
+      }, pollMs);
     }
     /* === /НОВОЕ === */
 
@@ -454,8 +487,10 @@ button:disabled .loader { display: block; }
         if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
       }
 
-      // Запускаем таймер и точное автообновление
-      startScheduleAutoReloadWithCountdown();
+      // Планируем точный момент перезагрузки + запускаем обратный отсчёт (если закрыто)
+      planBoundaryAndMaybeCountdown();
+      // Плюс фоновый монитор, чтобы подхватить изменения расписания без F5
+      startScheduleMonitor(5000);
     });
     </script>
 
@@ -690,4 +725,3 @@ button:disabled .loader { display: block; }
     </script>
 </body>
 </html>
-
