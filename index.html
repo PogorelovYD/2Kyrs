@@ -315,7 +315,7 @@ button:disabled .loader { display: block; }
       timeZone: 'Europe/Moscow',
       // Окна доступности (0=вс, 1=пн, ... , 6=сб)
       windows: [
-        { days: [3], start: '12:40', end: '15:30' }, // Пн–Пт 09:00–18:00
+        { days: [6], start: '12:40', end: '15:30' }, // Пн–Пт 09:00–18:00
         // { days: [6], start: '10:00', end: '14:00' },     // Пример: Сб 10:00–14:00
       ],
       message: 'Сейчас не время :)'
@@ -354,6 +354,18 @@ button:disabled .loader { display: block; }
       const el = document.getElementById('closed-schedule');
       if (el) el.textContent = text ? `График: ${text}` : '';
     }
+    // === Наблюдатель за сменой окна доступности  (НОВАЯ ЧАСТЬ) ===
+    function startScheduleWatcher(intervalMs = 10000) {
+      let lastState = isOpenNow(); // true = открыт, false = закрыт
+      setInterval(() => {
+        const nowState = isOpenNow();
+        if (nowState !== lastState) {
+          location.reload(); // ← авто обновление
+        }
+        lastState = nowState;
+      }, intervalMs);
+    }
+        
 
     // Флаг, чтобы остальной код (Firebase и т.д.) не стартовал
     window.__SITE_OPEN__ = isOpenNow();
@@ -376,6 +388,9 @@ button:disabled .loader { display: block; }
         const title = overlay?.querySelector('.closed-title');
         if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
       }
+        
+        // <<< НОВАЯ СТРОКА (запускаем авто-обновление)
+  startScheduleWatcher(10000);
     });
     </script>
 
@@ -612,6 +627,7 @@ button:disabled .loader { display: block; }
     </script>
 </body>
 </html>
+
 
 
 
