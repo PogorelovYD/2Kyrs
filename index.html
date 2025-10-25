@@ -231,6 +231,21 @@ button:disabled .loader { display: block; }
     to { opacity: 1; transform: translateY(0); }
 }
 </style>
+
+<!-- === БУТ-CSS + пессимистичный старт и фиксация закрытия между F5 === -->
+<style id="boot-style">
+  .container { display: none !important; }
+  #closed-overlay { display: flex !important; }
+</style>
+<script>
+  const HARD_CLOSE_KEY = '__hard_close__';
+  function setHardClose(v){ try{ sessionStorage.setItem(HARD_CLOSE_KEY, v ? '1' : '0'); }catch{} }
+  function getHardClose(){ try{ return sessionStorage.getItem(HARD_CLOSE_KEY) === '1'; }catch{ return false } }
+
+  // Пессимистично: пока не знаем правил — считаем, что закрыто
+  window.__SITE_OPEN__  = false;
+  window.__BLOCK_INIT__ = true;
+</script>
 </head>
 <body>
 
@@ -244,7 +259,7 @@ button:disabled .loader { display: block; }
                 Загляните, пожалуйста, на пару.
             </div>
             <div class="closed-schedule" id="closed-schedule"></div>
-            <div id="reopen-countdown"></div> <!-- таймер обратного отсчёта -->
+            <div id="reopen-countdown"></div>
         </div>
     </div>
 
@@ -291,7 +306,7 @@ button:disabled .loader { display: block; }
                         <span class="talon-title">ТАЛОН</span>
                     </div>
                     <div class="talon-body">
-                        <span class="талон-label talon-label">Имя:</span>
+                        <span class="talon-label">Имя:</span>
                         <span id="talon-name"></span>
                         <span class="talon-label">Номер в очереди:</span>
                         <span id="talon-number" class="talon-number-large"></span>
@@ -310,11 +325,11 @@ button:disabled .loader { display: block; }
 
     <!-- ===== РАСПИСАНИЕ ДОСТУПА (динамика из schedule.json) ===== -->
     <script>
-    // ===== ФОЛБЭК-ПРАВИЛА (на случай, если schedule.json недоступен при старте) =====
+    // ===== ФОЛБЭК-ПРАВИЛА (если schedule.json недоступен при старте) =====
     const ACCESS_RULES = {
       timeZone: 'Europe/Moscow',
       windows: [
-        { days: [6], start: '12:40', end: '15:30' }
+        { days: [6], start: '13:20', end: '15:30' }
       ],
       message: 'Сейчас не время :)'
     };
@@ -326,7 +341,7 @@ button:disabled .loader { display: block; }
       const d = new Date();
       const dowFmt = new Intl.DateTimeFormat('en-US', { timeZone: tz === 'local' ? undefined : tz, weekday: 'short' });
       const hmFmt  = new Intl.DateTimeFormat('ru-RU', { timeZone: tz === 'local' ? undefined : tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-      const dowStr = dowFmt.format(d); // 'Sun'..'Sat'
+      const dowStr = dowFmt.format(d);
       const parts  = hmFmt.formatToParts(d).reduce((a,p)=>{a[p.type]=p.value;return a;}, {});
       const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
       const hours = parseInt(parts.hour, 10);
@@ -351,18 +366,15 @@ button:disabled .loader { display: block; }
       if (el) el.textContent = text ? `График: ${text}` : '';
     }
 
-    // === Ближайшая граница (старт/конец) + обратный отсчёт и точное автообновление ===
+    // === Ближайшая граница + обратный отсчёт и автообновление ===
     let __countdownInterval = null;
     let __boundaryTimeout   = null;
-    let __lastPlannedBoundaryTs = null;
 
     function msUntilNextBoundary(rules = ACCESS_RULES) {
       const { timeZone, windows } = rules;
       const now = new Date();
 
-      const fmtHM  = new Intl.DateTimeFormat('ru-RU', { timeZone: timeZone === 'local' ? undefined : timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
       const fmtDOW = new Intl.DateTimeFormat('en-US',  { timeZone: timeZone === 'local' ? undefined : timeZone, weekday: 'short' });
-
       const dowMap = {Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6};
       const dow = dowMap[fmtDOW.format(now)];
 
@@ -379,7 +391,7 @@ button:disabled .loader { display: block; }
       const candidates = [];
       for (let dOff = 0; dOff < 8; dOff++){
         const thisDow = (dow + dOff) % 7;
-        const todays = windows.filter(w => w.days.includes(thisDow));
+        const todays = rules.windows.filter(w => w.days.includes(thisDow));
         for (const w of todays){
           const s = parseHM(w.start);
           const e = parseHM(w.end);
@@ -411,9 +423,8 @@ button:disabled .loader { display: block; }
 
     function planBoundaryAndMaybeCountdown() {
       clearBoundaryTimers();
-      const { ms, ts } = msUntilNextBoundary(ACCESS_RULES);
+      const { ms } = msUntilNextBoundary(ACCESS_RULES);
       if (ms == null) return;
-      __lastPlannedBoundaryTs = ts;
 
       const el = document.getElementById('reopen-countdown');
       if (!window.__SITE_OPEN__ && el) {
@@ -455,8 +466,11 @@ button:disabled .loader { display: block; }
       Object.assign(ACCESS_RULES, newRules || {});
       const wasOpen = window.__SITE_OPEN__;
       const nowOpen = isOpenNow(ACCESS_RULES);
-      window.__SITE_OPEN__ = nowOpen;
+      window.__SITE_OPEN__  = nowOpen;
       window.__BLOCK_INIT__ = !nowOpen;
+
+      // фиксируем актуальное состояние (между F5)
+      setHardClose(!nowOpen);
 
       const overlay = document.getElementById('closed-overlay');
       const container = document.querySelector('.container');
@@ -492,7 +506,7 @@ button:disabled .loader { display: block; }
         }
       }
 
-      // Периодические проверки (подхватываем изменения без F5)
+      // Периодические проверки
       setInterval(async () => {
         const remote = await fetchRemoteRules();
         if (!remote) return;
@@ -505,8 +519,9 @@ button:disabled .loader { display: block; }
       }, pollMs);
     }
 
-    // Флаг, чтобы остальной код (Firebase и т.д.) не стартовал
-    window.__SITE_OPEN__ = isOpenNow();
+    // --- ИНИЦИАЛИЗАЦИЯ ФЛАГОВ (с учётом фиксации между F5)
+    const __forcedClosed = getHardClose();
+    window.__SITE_OPEN__  = __forcedClosed ? false : isOpenNow(ACCESS_RULES);
     window.__BLOCK_INIT__ = !window.__SITE_OPEN__;
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -525,11 +540,12 @@ button:disabled .loader { display: block; }
         if (title && ACCESS_RULES.message) title.textContent = ACCESS_RULES.message;
       }
 
-      // Планируем границу (обратный отсчёт, автообновление)
       planBoundaryAndMaybeCountdown();
-
-      // Стартуем вотчер внешнего расписания (подхват изменений без F5)
       startRemoteRulesWatcher(5000);
+
+      // снимаем бут-CSS после того, как приняли решение
+      const boot = document.getElementById('boot-style');
+      if (boot) boot.remove();
     });
     </script>
 
@@ -706,7 +722,7 @@ button:disabled .loader { display: block; }
 
             handleDeleteClick: () => API.deleteTalon(),
 
-            // ==== НОВАЯ ФУНКЦИЯ (кнопка "Пропустить 1 человека") ====
+            // Кнопка "Пропустить 1 человека"
             handleSkipClick: async () => {
                 if (!currentUserTalonId) return;
                 const docRef = queueCollection.doc(currentUserTalonId);
@@ -764,6 +780,3 @@ button:disabled .loader { display: block; }
     </script>
 </body>
 </html>
-
-
-
