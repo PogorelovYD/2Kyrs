@@ -353,39 +353,50 @@ async function fetchRemoteRules(){
   }catch{ return null; }
 }
 
+/* === ИСПРАВЛЕНАЯ ФУНКЦИЯ === */
 function applyRulesAndReact(remoteRules){
   if(!remoteRules) return;
 
-  const nowOpen=isOpenNow(remoteRules);
-  const overlay=document.getElementById('closed-overlay');
-  const container=document.querySelector('.container');
-  const title=overlay?.querySelector('.closed-title');
+  const nowOpen = isOpenNow(remoteRules);
 
-  if(nowOpen!==__LAST_OPEN__){
-    window.__SITE_OPEN__=nowOpen;
-    window.__BLOCK_INIT__=!nowOpen;
+  const overlay  = document.getElementById('closed-overlay');
+  const container = document.querySelector('.container');
+  const title    = overlay?.querySelector('.closed-title');
 
-    if(nowOpen){
-      overlay?.classList.remove('active');
-      container?.classList.remove('hidden');
-      container?.removeAttribute('inert');
-      container?.style.removeProperty('display');
-      if(typeof window.startQueueApp==='function') window.startQueueApp();
-    }else{
-      overlay?.classList.add('active');
-      container?.classList.add('hidden');
-      container?.setAttribute('inert','');
-      container?.style.setProperty('display','none');
-      if(title && remoteRules.message) title.textContent=remoteRules.message;
-    }
+  // Всегда актуализируем DOM-состояние
+  if (nowOpen) {
+    overlay?.classList.remove('active');
+    container?.classList.remove('hidden');
+    container?.removeAttribute('inert');
+    container?.style.removeProperty('display');   // снять inline display:none
+  } else {
+    overlay?.classList.add('active');
+    container?.classList.add('hidden');
+    container?.setAttribute('inert','');
+    container?.style.setProperty('display','none');
+    if (title && remoteRules.message) title.textContent = remoteRules.message;
+  }
+
+  // Флаги обновляем при изменении
+  if (nowOpen !== __LAST_OPEN__) {
+    window.__SITE_OPEN__  = nowOpen;
+    window.__BLOCK_INIT__ = !nowOpen;
+  }
+
+  // Если открыто и приложение ещё не стартовало — запускаем
+  if (nowOpen && !window.__APP_STARTED__ && typeof window.startQueueApp === 'function') {
+    try { window.startQueueApp(); } catch(e){ console.error(e); }
   }
 
   renderSchedule(remoteRules);
   planBoundaryAndMaybeCountdown(remoteRules);
 
-  __LAST_OPEN__=nowOpen;
-  const boot=document.getElementById('boot-style'); if(boot) boot.remove();
+  __LAST_OPEN__ = nowOpen;
+
+  const boot = document.getElementById('boot-style');
+  if (boot) boot.remove();
 }
+/* === /ИСПРАВЛЕНАЯ ФУНКЦИЯ === */
 
 document.addEventListener('DOMContentLoaded', ()=>{
   const overlay=document.getElementById('closed-overlay');
@@ -567,7 +578,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       handleDeleteClick: () => API.deleteTalon(),
 
-      // ПРОПУСТИТЬ РОВНО 1 ЧЕЛОВЕКА: безопасная транзакция со "свапом" или +1 наносекунда
+      // ПРОПУСТИТЬ РОВНО 1 ЧЕЛОВЕКА
       handleSkipClick: async () => {
         if (!currentUserTalonId) return;
 
@@ -575,13 +586,11 @@ document.addEventListener('DOMContentLoaded', ()=>{
         const fpId = firebase.firestore.FieldPath.documentId();
 
         try {
-          // 1) читаем себя вне транзакции, чтобы узнать текущий ts
           const userSnap = await userRef.get();
           if (!userSnap.exists) throw new Error('Ваш талон не найден.');
           const userTs = userSnap.get('timestamp');
           if (!userTs) throw new Error('Подождите секунду, запись ещё сохраняется…');
 
-          // 2) находим СЛЕДУЮЩЕГО по очереди (после нас) вне транзакции
           const nextQ = queueCollection
             .orderBy('timestamp','asc')
             .orderBy(fpId,'asc')
@@ -592,7 +601,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
           const nextRef = nextQS.docs[0].ref;
 
-          // 3) атомарно меняем местами в транзакции (или +1ns если ts равны)
           await firebase.firestore().runTransaction(async (tx) => {
             const [uS, nS] = await Promise.all([tx.get(userRef), tx.get(nextRef)]);
             if (!uS.exists || !nS.exists) throw new Error('Очередь обновляется, попробуйте ещё раз.');
@@ -601,24 +609,18 @@ document.addEventListener('DOMContentLoaded', ()=>{
             const nTs = nS.get('timestamp');
             if (!uTs || !nTs) throw new Error('Подождите, данные ещё сохраняются…');
 
-            // если равны — двигаем вас на +1 наносекунду после next
             if (uTs.seconds === nTs.seconds && uTs.nanoseconds === nTs.nanoseconds) {
               let sec = nTs.seconds;
               let nano = nTs.nanoseconds + 1;
               if (nano >= 1_000_000_000) { sec += 1; nano -= 1_000_000_000; }
               const bumped = new firebase.firestore.Timestamp(sec, nano);
               tx.update(userRef, { timestamp: bumped });
-              // next остаётся как есть
             } else {
-              // обычный свап
               tx.update(userRef, { timestamp: nTs });
               tx.update(nextRef, { timestamp: uTs });
             }
           });
 
-          // опционально тост:
-          // UI.showFormError('Вы пропустили одного человека.');
-          // setTimeout(()=>UI.showFormError(''),1500);
         } catch (err) {
           console.error(err);
           UI.showFormError(err.message || 'Не удалось пропустить. Попробуйте ещё раз.');
@@ -676,4 +678,3 @@ document.addEventListener('DOMContentLoaded', ()=>{
   </script>
 </body>
 </html>
-
