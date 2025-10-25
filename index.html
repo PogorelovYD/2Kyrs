@@ -513,9 +513,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
     };
 
     const API = {
+      // === ИЗМЕНЕНО: сортировка по orderKey ===
       listenForQueueChanges: () => {
         UI.showQueueLoading(true);
-        queueCollection.orderBy('timestamp', 'asc').onSnapshot(
+        queueCollection.orderBy('orderKey', 'asc').onSnapshot(
           (snapshot) => {
             const queueData = [];
             snapshot.forEach((doc) => queueData.push({ id: doc.id, ...doc.data() }));
@@ -529,11 +530,18 @@ document.addEventListener('DOMContentLoaded', ()=>{
           }
         );
       },
+
+      // === ИЗМЕНЕНО: при добавлении пишем orderKey ===
       addTalon: async (name) => {
         UI.setFormLoading(true);
         UI.showFormError(null);
         try {
-          const docRef = await queueCollection.add({ name, timestamp: firebase.firestore.FieldValue.serverTimestamp() });
+          const orderKey = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+          const docRef = await queueCollection.add({
+            name,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+            orderKey
+          });
           localStorage.setItem(STORAGE_KEY_ID, docRef.id);
           localStorage.setItem(STORAGE_KEY_NAME, name);
           UI.showTalon(name, docRef.id);
@@ -542,6 +550,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
           UI.showFormError(`Ошибка: ${error.message}`);
         } finally { UI.setFormLoading(false); }
       },
+
       deleteTalon: async () => {
         if (!currentUserTalonId) return;
         UI.setTalonLoading(true); UI.showFormError(null);
@@ -553,6 +562,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
           UI.showFormError(`Ошибка: ${error.message}`);
         } finally { UI.setTalonLoading(false); }
       },
+
       deleteOldTalons: async () => {
         try {
           const fiveHoursAgo = firebase.firestore.Timestamp.fromMillis(Date.now() - 5*60*60*1000);
@@ -578,47 +588,43 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       handleDeleteClick: () => API.deleteTalon(),
 
-      // ПРОПУСТИТЬ РОВНО 1 ЧЕЛОВЕКА
+      // === ИЗМЕНЕНО: пропустить РОВНО 1 — свап orderKey ===
       handleSkipClick: async () => {
         if (!currentUserTalonId) return;
 
         const userRef = queueCollection.doc(currentUserTalonId);
-        const fpId = firebase.firestore.FieldPath.documentId();
 
         try {
           const userSnap = await userRef.get();
           if (!userSnap.exists) throw new Error('Ваш талон не найден.');
-          const userTs = userSnap.get('timestamp');
-          if (!userTs) throw new Error('Подождите секунду, запись ещё сохраняется…');
+          const myKey = userSnap.get('orderKey');
+          if (typeof myKey !== 'number') throw new Error('Подождите секунду, идёт инициализация…');
 
-          const nextQ = queueCollection
-            .orderBy('timestamp','asc')
-            .orderBy(fpId,'asc')
-            .startAfter(userTs, userRef.id)
-            .limit(1);
-          const nextQS = await nextQ.get();
-          if (nextQS.empty) throw new Error('Вы уже последние в очереди.');
+          // следующий по orderKey
+          const nextQS = await queueCollection
+            .orderBy('orderKey', 'asc')
+            .startAfter(myKey)
+            .limit(1)
+            .get();
+
+          if (nextQS.empty) {
+            UI.showFormError('Вы уже последний в очереди.');
+            setTimeout(()=>UI.showFormError(''), 1500);
+            return;
+          }
 
           const nextRef = nextQS.docs[0].ref;
 
+          // атомарный свап ключей порядка
           await firebase.firestore().runTransaction(async (tx) => {
             const [uS, nS] = await Promise.all([tx.get(userRef), tx.get(nextRef)]);
             if (!uS.exists || !nS.exists) throw new Error('Очередь обновляется, попробуйте ещё раз.');
+            const a = uS.get('orderKey');
+            const b = nS.get('orderKey');
+            if (typeof a !== 'number' || typeof b !== 'number') throw new Error('Подождите, данные ещё сохраняются…');
 
-            const uTs = uS.get('timestamp');
-            const nTs = nS.get('timestamp');
-            if (!uTs || !nTs) throw new Error('Подождите, данные ещё сохраняются…');
-
-            if (uTs.seconds === nTs.seconds && uTs.nanoseconds === nTs.nanoseconds) {
-              let sec = nTs.seconds;
-              let nano = nTs.nanoseconds + 1;
-              if (nano >= 1_000_000_000) { sec += 1; nano -= 1_000_000_000; }
-              const bumped = new firebase.firestore.Timestamp(sec, nano);
-              tx.update(userRef, { timestamp: bumped });
-            } else {
-              tx.update(userRef, { timestamp: nTs });
-              tx.update(nextRef, { timestamp: uTs });
-            }
+            tx.update(userRef, { orderKey: b });
+            tx.update(nextRef, { orderKey: a });
           });
 
         } catch (err) {
@@ -628,6 +634,28 @@ document.addEventListener('DOMContentLoaded', ()=>{
         }
       }
     };
+
+    // --- НОВОЕ: разовая инициализация orderKey для старых документов ---
+    async function ensureOrderKeysForOldDocs() {
+      try {
+        const snap = await queueCollection.orderBy('timestamp', 'asc').limit(200).get();
+        const batch = db.batch();
+        let changed = 0;
+        snap.forEach((doc, i) => {
+          const data = doc.data() || {};
+          if (typeof data.orderKey !== 'number') {
+            const ts = data.timestamp && data.timestamp.toMillis ? data.timestamp.toMillis() : Date.now();
+            const orderKey = ts * 1000 + i; // стабильный порядок по старому времени
+            batch.update(doc.ref, { orderKey });
+            changed++;
+          }
+        });
+        if (changed > 0) { await batch.commit(); }
+      } catch (e) {
+        console.warn('Не удалось проинициализировать orderKey для старых документов:', e);
+      }
+    }
+    // -------------------------------------------------------------------
 
     function cacheDomElements(){
       dom.queueList = document.getElementById('queue-list');
@@ -653,6 +681,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
       if (dom.deleteButton) dom.deleteButton.addEventListener('click', Handlers.handleDeleteClick);
       if (dom.skipButton) dom.skipButton.addEventListener('click', Handlers.handleSkipClick);
       API.listenForQueueChanges();
+
+      // разово заполним orderKey для старых записей (если есть)
+      ensureOrderKeysForOldDocs();
 
       const id = localStorage.getItem(STORAGE_KEY_ID);
       const name = localStorage.getItem(STORAGE_KEY_NAME);
