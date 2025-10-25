@@ -660,7 +660,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
       const lastCleanup = localStorage.getItem(STORAGE_KEY_LAST_CLEANUP);
       const now = Date.now();
       if (!lastCleanup || (now - new Date(lastCleanup).getTime()) > hour) {
-        API.deleteOldTalons().then(()=>localStorage.setItem(STORAGE_KEY_LAST_CLEANUP', new Date().toISOString()));
+        API.deleteOldTalons().then(() => {
+          localStorage.setItem(STORAGE_KEY_LAST_CLEANUP, new Date().toISOString());
+        });
       }
     }
 
@@ -674,3 +676,4 @@ document.addEventListener('DOMContentLoaded', ()=>{
   </script>
 </body>
 </html>
+
